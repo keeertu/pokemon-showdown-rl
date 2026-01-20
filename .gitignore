@@ -1,0 +1,46 @@
+# Python
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# RL / ML Artifacts
+models/
+checkpoints/
+runs/
+logs/
+*.pt
+*.pth
+*.onnx
+*.ckpt
+runs/
+replays/
+videos/
+
+
+# Pokémon Showdown / Node.js
+showdown/pokemon-showdown/node_modules/
+showdown/pokemon-showdown/dist/
+showdown/pokemon-showdown/logs/
+showdown/pokemon-showdown/databases/*.db
+showdown/pokemon-showdown/config/*.js
+!showdown/pokemon-showdown/config/config-example.js
+
+# Environment & Secrets
+.env
+.env.*
+*.secret
+
+# OS / Editor Noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
