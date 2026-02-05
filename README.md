@@ -1,96 +1,76 @@
 # Pokémon Battle Simulator RL
 
-This project implements a reinforcement learning environment for competitive Pokémon battles, specifically targeting Gen 9 Random Battles. It leverages the Pokémon Showdown simulator and the `poke-env` library to provide a standardized interface for RL agents. Battles are executed in a real Pokémon Showdown simulator instance, not a mock or simplified environment, enabling interaction with the full game logic and stochasticity of competitive play.
+A reinforcement learning framework for competitive Pokémon battles, using **Stable-Baselines3 (PPO)** and **Gymnasium** to train agents on a local **Pokémon Showdown** server.
 
-**Intended Audience**: This project is intended for developers or researchers familiar with reinforcement learning and asynchronous systems.
+---
 
-## Gen 9 Random Battles Constraints
-- **No team building**: The agent must adapt to randomly generated teams (Random Battles format).
-- **Partial observability**: The agent only sees the information available to a player in a real match (e.g., opponent's held items and full team are hidden until revealed).
-- **Long-horizon credit assignment**: Decisions made in early turns can have critical impacts many turns later.
+## 1. Project Overview
+The goal of this project is to build a high-performance, strategic agent for Pokémon battles. Unlike simplified simulations, this project interacts with a full Pokémon Showdown Node.js server, ensuring absolute fidelity to the game's mechanics, including complex status effects, weather, and RNG.
 
-## Current State
+### Key Architecture
+- **Simulator**: [Pokémon Showdown](https://github.com/smogon/pokemon-showdown) (Active Node.js instance)
+- **Interface**: `poke-env` for protocol handling and asynchronous battle management.
+- **Environment**: Custom Gymnasium wrapper (`PokemonShowdownEnv`) with robust **Queue-based synchronization**.
+- **Model**: Stable-Baselines3 PPO (Proximal Policy Optimization) with an MLP policy.
 
-- **Environment wrapper**: ✅ Functional
-- **Async RL bridge (RLPlayer)**: ✅ Functional
-- **Training loop**: 🚧 Work in progress
-- **Learning agent (DQN/PPO/etc.)**: ❌ Not implemented yet
+---
 
-## Tech Stack
+## 2. Current Capabilities
+- **Stable Gymnasium Wrapper**: Resolved legacy turn-synchronization issues. `step()` now correctly waits for server confirmation before proceeding.
+- **Unique Session Management**: Uses UUID-based naming (`RLPlayer_xxxx`) for every run to prevent session collisions on the local server.
+- **Stability verified**: Successfully runs for hundreds of episodes without freezing or desync.
+- **Human vs Agent Mode**: A dedicated mode allows users to challenge the trained agent directly from a web browser.
+- **Advanced Reward Shaping**: Rewards are calculated based on HP differentials and faint counts to provide dense signals for training.
 
-- **Python**: Core logic and RL environment.
-- **poke-env**: Python interface for Pokémon Showdown.
-- **Gymnasium**: Standard API for reinforcement learning environments.
-- **PyTorch**: Deep learning framework for agent implementation.
-- **Pokémon Showdown (Node.js)**: The underlying battle simulator.
-- **asyncio**: Asynchronous I/O for handling battle events.
+---
 
-## Project Structure
+## 3. Training Pipeline
+The pipeline is managed via `train_ppo.py`.
 
-- `python/`: Contains the RL logic, environment wrappers, and agent definitions.
-    - `pokemon_env.py`: Defines the `PokemonShowdownEnv` (Gymnasium wrapper) and `RLPlayer` (async bridge).
-    - `test_showdown.py`: Integration test for bot communication.
-- `showdown/`: Contains a local instance of the Pokémon Showdown server.
-    - `pokemon-showdown/`: The Node.js server source code.
-- `report/`: Documentation and project write-ups.
+- **Observation Space (23 features)**: Includes normalized turn counts, team HP fractions, type effectiveness multipliers, weather/terrain flags, and status conditions.
+- **Reward System**:
+  - `(Δ Damage Dealt - Δ Damage Taken) + 0.5 * (Δ Faints)`
+  - `+/- 2.0` terminal reward for victory/defeat.
+  - `-0.02` per-turn penalty to discourage passive play.
+- **Execution**: The script initializes a local `RandomPlayer` opponent and launches asynchronous battle threads monitored by the SB3 training loop.
 
-## How to Run (Current Capabilities)
+---
 
-> Note: These steps verify environment setup and simulator communication only. End-to-end RL training is not yet implemented.
+## 4. Human Battle Mode
+Interact with your trained agent in a real battle.
 
-### 1. Dependency Setup
-Ensure you have Python 3.10+ and Node.js 16+ installed.
+1.  **Start Showdown**: Ensure your local server is running at `localhost:8000`.
+2.  **Launch Agent**:
+    ```bash
+    python battle_vs_human.py
+    ```
+3.  **Challenge**: the script will generate a unique agent name. Challenge this name on your browser-based Showdown client (Format: **Gen 8 Anything Goes**).
 
-**Python Setup:**
-```bash
-pip install gymnasium poke-env numpy torch
-```
+---
 
-**Node.js Setup:**
-```bash
-cd showdown/pokemon-showdown
-npm install
-```
+## 5. Current Limitations (Research Focus)
+- **Static Strategy**: The agent relies on current-state observation and lacks long-term planning (e.g., preserving a core sweeper for late-game).
+- **Missing State Data**: Stat boost stages and entry hazards (Stealth Rock, Spikes) are not yet in the observation vector.
+- **Simple Switching**: The agent often prefers staying in over strategic pivots unless forced to switch.
 
-### 2. Start the Showdown Server
-The simulator must be running locally for the Python environment to connect.
-```bash
-cd showdown/pokemon-showdown
-node pokemon-showdown start
-```
+---
 
-### 3. Run Environment Test
-Test the Gymnasium wrapper with a random agent:
-```bash
-python python/pokemon_env.py
-```
+## 6. Future Roadmap
+- [ ] **Observation Expansion**: Add stat stages, weather duration, and hazard tracking.
+- [ ] **Complex Rewards**: Reward "positioning" (e.g., getting a boost) vs just raw damage.
+- [ ] **Opponent Scaling**: Move from Random opponents to heuristic-based or self-play regimes.
+- [ ] **Architecture Search**: Compare PPO against DQN and QR-DQN implementations.
+- [ ] **Web Deployment**: Allow the agent to play on public Smogon ladders.
 
-### 4. Run Client Test
-Verify the communication bridge:
-```bash
-python python/test_showdown.py
-```
+---
 
-## Known Limitations
-- **Sparse or noisy reward signals**: Win/loss signals only arrive at the end of long episodes; intermediate HP rewards can be misleading.
-- **High variance between battles**: Random team generation leads to significant variance in difficulty and matchups.
-- **Training not yet reproducible or stabilized**: As the training loop is WIP, hyperparameter sensitivity and convergence are not yet established.
+## 7. Project Structure
+- `pokemon_env.py`: Core Gymnasium logic and Queue-based sync engine.
+- `train_ppo.py`: PPO training and hyperparameter configuration.
+- `battle_vs_human.py`: Inference mode for human challenges.
+- `ash_team.txt` / `leon_team.txt`: Team configurations in Poke-Paste format.
 
-## What Is NOT Implemented Yet
+---
 
-- **No trained RL agent**: Currently relies on random or manual action selection.
-- **No stable reward shaping**: Reward signals are currently basic (HP difference).
-- **No long-horizon training pipeline**: Infrastructure for multi-epoch training and evaluation is pending.
-
-## Future Roadmap
-
-1. **Heuristic Agent**: Implement a rule-based baseline using type-advantage logic.
-2. **Reward Shaping**: Refine reward functions to include status effects and positioning.
-3. **RL Agent**: Implement DQN or PPO using PyTorch.
-4. **Self-play**: Establish a pipeline for agents to train against themselves.
-
-## Project Philosophy
-
-- **Research-oriented**: Focused on exploring RL application in complex state spaces.
-- **Iterative development**: Prioritizing functional building blocks over a finished product.
-- **Transparency over polish**: Openly documenting limitations and work-in-progress state.
+## 8. Research Direction
+This project explores the intersection of high-cardinality action spaces and multi-modal state representation in a stochastic, non-deterministic game environment. Contribution focus areas include reward shaping, state embedding optimization, and curriculum learning.

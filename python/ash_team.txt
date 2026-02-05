@@ -1,0 +1,53 @@
+Pikachu @ Light Ball
+Ability: Static
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Volt Tackle
+- Thunderbolt
+- Iron Tail
+- Quick Attack
+
+Lucario @ Life Orb
+Ability: Inner Focus
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Close Combat
+- Meteor Mash
+- Extreme Speed
+- Swords Dance
+
+Dragonite @ Heavy-Duty Boots
+Ability: Multiscale
+EVs: 252 Atk / 4 SpD / 252 Spe
+Adamant Nature
+- Dragon Dance
+- Dual Wingbeat
+- Earthquake
+- Extreme Speed
+
+Gengar @ Focus Sash
+Ability: Cursed Body
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Shadow Ball
+- Sludge Bomb
+- Focus Blast
+- Destiny Bond
+
+Sirfetchd @ Leek
+Ability: Scrappy
+EVs: 252 Atk / 4 Def / 252 Spe
+Adamant Nature
+- Close Combat
+- Brave Bird
+- Knock Off
+- First Impression
+
+Dracovish @ Choice Scarf
+Ability: Strong Jaw
+EVs: 252 Atk / 4 SpD / 252 Spe
+Adamant Nature
+- Fishious Rend
+- Crunch
+- Ice Fang
+- Psychic Fangs
