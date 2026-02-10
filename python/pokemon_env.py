@@ -1,8 +1,8 @@
 import asyncio
-import threading
+import os
 import time
-import queue
 import uuid
+import gc
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -11,13 +11,9 @@ from poke_env.player.player import Player
 from poke_env.player import RandomPlayer
 from poke_env.concurrency import POKE_LOOP, create_in_poke_loop
 from poke_env.ps_client import AccountConfiguration
+from model_utils import build_obs
 
-# Set to True to enable debug logging
-DEBUG = False
-
-# ======================================================
-# RL Player with Queue-based Synchronization
-# ======================================================
+# RL Player using rendezvous synchronization
 class RLPlayer(Player):
     """
     RL Player using poke-env's queue pattern for synchronization.
@@ -25,7 +21,9 @@ class RLPlayer(Player):
     """
     
     def __init__(self, battle_format="gen8anythinggoes", team_file="ash_team.txt"):
-        with open(team_file, "r") as f:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        team_path = os.path.join(base_dir, team_file)
+        with open(team_path, "r") as f:
             team = f.read()
             
         # Generate unique username to avoid collisions/zombies
@@ -44,34 +42,25 @@ class RLPlayer(Player):
         self._battle_finished = False
 
     async def choose_move(self, battle):
-        """
-        Called by poke-env when a move decision is needed.
-        Puts battle on queue, waits for order from step().
-        """
+        """Called by poke-env to request a move."""
         self._current_battle = battle
         self._battle_finished = battle.finished
-        
-        if DEBUG:
-            print(f"[DEBUG] choose_move: Turn {battle.turn} | Requesting Action")
-
-        # Put battle state on queue for step() to consume
-        await self._battle_queue.put(battle)
         
         if battle.finished:
             return self.choose_random_move(battle)
         
-        # Wait for step() to provide an order
+        # Pass battle state to the environment step()
+        await self._battle_queue.put(battle)
+
+        # Wait for the next order (step() takes action)
         try:
-            order = await asyncio.wait_for(self._order_queue.get(), timeout=60.0)
-            if DEBUG:
-                print(f"[DEBUG] choose_move: Turn {battle.turn} | Received Order: {order}")
+            order = await asyncio.wait_for(self._order_queue.get(), timeout=30.0)
             return order
         except asyncio.TimeoutError:
             print(f"[WARN] choose_move timeout (Turn {battle.turn}), using random move")
             return self.choose_random_move(battle)
 
     def _battle_finished_callback(self, battle):
-        """Called when battle ends - put final state on queue."""
         self._battle_finished = True
         asyncio.run_coroutine_threadsafe(
             self._battle_queue.put(battle), POKE_LOOP
@@ -101,7 +90,6 @@ class RLPlayer(Player):
         )
 
     def reset_for_new_battle(self):
-        """Reset player state for a new battle."""
         self._current_battle = None
         self._battle_finished = False
         # Clear queues synchronously  
@@ -121,7 +109,10 @@ class RLPlayer(Player):
                 break
         except:
             pass
-        self.battles.clear()
+        # Remove only finished battles to release memory safely
+        finished_tags = [tag for tag, b in self.battles.items() if b.finished]
+        for tag in finished_tags:
+            del self.battles[tag]
 
     async def _drain_queue(self, q):
         while not q.empty():
@@ -131,28 +122,28 @@ class RLPlayer(Player):
                 break
 
 
-# ======================================================
-# Gym Environment
-# ======================================================
 class PokemonShowdownEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, battle_format="gen8anythinggoes",
                  player_team_file="ash_team.txt",
                  opponent_team_file="leon_team.txt",
-                 human_opponent=False):
+                 human_opponent=False,
+                 enable_logging=False):
         super().__init__()
 
         self.battle_format = battle_format
         self.player_team_file = player_team_file
         self.opponent_team_file = opponent_team_file
         self.human_opponent = human_opponent
+        self.enable_logging = enable_logging
 
         self.action_space = spaces.Discrete(10)
+        # Expanded Observation Space: 48 features
         self.observation_space = spaces.Box(
             low=0.0,
             high=1.0,
-            shape=(23,),
+            shape=(48,),
             dtype=np.float32,
         )
 
@@ -164,7 +155,9 @@ class PokemonShowdownEnv(gym.Env):
         
         self.opponent = None
         if not self.human_opponent:
-            with open(opponent_team_file, "r") as f:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            opp_team_path = os.path.join(base_dir, opponent_team_file)
+            with open(opp_team_path, "r") as f:
                 opp_team = f.read()
                 
             opp_username = f"Opponent_{uuid.uuid4().hex[:8]}"
@@ -176,86 +169,129 @@ class PokemonShowdownEnv(gym.Env):
                 account_configuration=opp_config,
             )
 
-        self._obs = np.zeros(23, dtype=np.float32)
+        self._obs = np.zeros(48, dtype=np.float32)
         self.action_mask = np.zeros(10, dtype=np.int8)
         self._current_battle = None
         self._battle_future = None
 
         self._prev_my_hp = None
         self._prev_opp_hp = None
+        self._prev_opp_hazards = 0
+        self._prev_my_boosts = 0
+        self._prev_my_faints = 0
+        self._prev_opp_faints = 0
         self._step_count = 0
         self._episode_count = 0
 
-    # --------------------------------------------------
-    # RESET
-    # --------------------------------------------------
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._episode_count += 1
 
-        print(f"\n[Episode {self._episode_count}] Resetting...")
+        # Stabilization delay
+        time.sleep(0.1)
+        
+        # Period GC to keep memory low
+        if self._episode_count % 1 == 0:
+            gc.collect()
+
+        # 3. Resource Tracking every 50 episodes
+        if self._episode_count % 50 == 0:
+            active_battles = len(self.player.battles)
+            print(f"[STATS] Episode {self._episode_count} | Active Battles: {active_battles}")
+
+        if self.enable_logging:
+            print(f"\n[Episode {self._episode_count}] Resetting...")
 
         # Cancel previous battle task if running
         if self._battle_future is not None:
             self._battle_future.cancel()
             self._battle_future = None
 
-        self._obs = np.zeros(23, dtype=np.float32)
+        self._obs = np.zeros(48, dtype=np.float32)
         self._current_battle = None
         self._prev_my_hp = None
         self._prev_opp_hp = None
+        self._prev_opp_hazards = 0
+        self._prev_my_boosts = 0
+        self._prev_my_faints = 0
+        self._prev_opp_faints = 0
         self._step_count = 0
 
-        # Reset player state (clears queues)
         self.player.reset_for_new_battle()
-        # Explicitly clear opponent battles to avoid memory leak
+        # Clear finished battles to prevent leaks
         if self.opponent:
-            self.opponent.battles.clear()
+            finished_opp_tags = [tag for tag, b in self.opponent.battles.items() if b.finished]
+            for tag in finished_opp_tags:
+                del self.opponent.battles[tag]
 
-        # Start battle asynchronously
-        async def start_battle():
-            if self.human_opponent:
-                print(f"[INFO] RLPlayer {self.player.username} waiting for challenge...")
-                await self.player.accept_challenges(None, 1)
-            else:
-                # Reuse persistent opponent
-                await self.player.battle_against(self.opponent)
-
-        self._battle_future = asyncio.run_coroutine_threadsafe(start_battle(), POKE_LOOP)
-
-        # Wait for first battle state from queue
-        print(f"[Episode {self._episode_count}] Waiting for battle start...")
-        battle = self.player.get_battle_sync(timeout=60.0)
+        # Start next match
+        max_retries = 2
+        battle = None
         
+        for attempt in range(max_retries + 1):
+            async def start_battle():
+                if self.human_opponent:
+                    if self.enable_logging:
+                        print(f"[INFO] RLPlayer {self.player.username} waiting for challenge...")
+                    await self.player.accept_challenges(None, 1)
+                else:
+                    assert self.opponent is not None
+                    await self.player.battle_against(self.opponent)
+
+            if self._battle_future is not None:
+                self._battle_future.cancel()
+
+            self._battle_future = asyncio.run_coroutine_threadsafe(start_battle(), POKE_LOOP)
+
+            # Block until first state arrives
+            if self.enable_logging:
+                print(f"[Episode {self._episode_count}] Waiting for battle start (Attempt {attempt + 1})...")
+            
+            battle = self.player.get_battle_sync(timeout=30.0)
+            if battle is not None:
+                break
+                
+            if attempt < max_retries:
+                if self.enable_logging:
+                    print(f"[Episode {self._episode_count}] Battle start timeout, retrying with increased delay...")
+                self.player.reset_for_new_battle()
+                time.sleep(0.5)
+
         if battle is None:
-            print(f"[Episode {self._episode_count}] ERROR: Timed out waiting for battle start")
+            print(f"[Episode {self._episode_count}] ERROR: Failed to start battle after {max_retries + 1} attempts")
             self.action_mask = np.ones(10, dtype=np.int8)
             return self._obs, {"action_mask": self.action_mask}
 
-        print(f"[Episode {self._episode_count}] Battle started! ID: {battle.battle_tag}")
+        if self.enable_logging:
+            print(f"[Episode {self._episode_count}] Battle started! ID: {battle.battle_tag}")
         self._current_battle = battle
         self._build_obs(battle)
         self._build_action_mask(battle)
+        # Initialize reward trackers from current state
         self._prev_my_hp = self._get_team_hp(battle, my_team=True)
         self._prev_opp_hp = self._get_team_hp(battle, my_team=False)
+        self._prev_opp_hazards = self._count_hazards(battle, my_side=False)
+        self._prev_my_boosts = self._sum_boosts(battle, my_side=True)
+        self._prev_my_faints = 0
+        self._prev_opp_faints = 0
 
         return self._obs.copy(), {"action_mask": self.action_mask.copy()}
 
-    # --------------------------------------------------
-    # STEP
-    # --------------------------------------------------
     def step(self, action):
         self._step_count += 1
+        
+        # Reward penalty for switching
+        is_switch_action = (action >= 4)
 
         if self._current_battle is None or self._current_battle.finished:
             reward, terminated = self._compute_final_reward()
             return self._obs.copy(), reward, terminated, False, {"action_mask": self.action_mask.copy()}
 
-        # Convert action to order and send to player
+        # Dispatch order
         order = self._action_to_order(int(action), self._current_battle)
         self.player.put_order_sync(order)
 
-        # Wait for next battle state (blocks until turn advances or battle ends)
+        # Wait for turn resolution
         battle = self.player.get_battle_sync(timeout=30.0)
 
         if battle is None:
@@ -265,27 +301,63 @@ class PokemonShowdownEnv(gym.Env):
                 return self._obs.copy(), reward, terminated, False, {"action_mask": self.action_mask.copy()}
             # Return current state with small penalty
             print(f"[WARN] Step timeout at turn {self._current_battle.turn}")
-            return self._obs.copy(), -0.02, False, False, {"action_mask": self.action_mask.copy()}
+            return self._obs.copy(), -0.05, False, False, {"action_mask": self.action_mask.copy()}
 
         self._current_battle = battle
-        self._build_obs(battle)
+        self._obs = build_obs(battle)
         self._build_action_mask(battle)
 
-        reward, terminated = self._compute_reward()
+        reward, terminated = self._compute_reward(is_switch_action)
         
-        if DEBUG:
-            self._print_turn_info(action, reward)
+        if self.enable_logging:
+            self._print_battle_log(action, reward)
 
         return self._obs.copy(), reward, terminated, False, {"action_mask": self.action_mask.copy()}
 
-    # --------------------------------------------------
-    # ACTION TO ORDER
-    # --------------------------------------------------
+    def _print_battle_log(self, action, reward):
+        battle = self._current_battle
+        if battle is None: return
+
+        active = battle.active_pokemon.species if battle.active_pokemon else "None"
+        opp = battle.opponent_active_pokemon.species if battle.opponent_active_pokemon else "None"
+        
+        # Get action string
+        action_str = "Random"
+        if action < 4 and action < len(battle.available_moves):
+            action_str = f"Move: {battle.available_moves[action].id}"
+        elif action >= 4:
+            sw_idx = action - 4
+            if sw_idx < len(battle.available_switches):
+                action_str = f"Switch: {battle.available_switches[sw_idx].species}"
+
+        # Detect KOs (using current vs previous faints)
+        log_event = ""
+        if hasattr(self, '_prev_opp_faints') and sum(1 for mon in battle.opponent_team.values() if mon.fainted) > self._prev_opp_faints:
+            log_event = " | [KO] Opponent fainted!"
+        elif hasattr(self, '_prev_my_faints') and sum(1 for mon in battle.team.values() if mon.fainted) > self._prev_my_faints:
+            log_event = " | [KO] My Pokémon fainted!"
+
+        print(f"T{battle.turn:<2} | {active} vs {opp} | {action_str:<18} | Rew: {reward:+.3f}{log_event}")
+
     def _action_to_order(self, action, battle):
-        """Convert discrete action to poke-env order."""
+        """Convert gym action to poke-env order."""
         # Actions 0-3: moves
         # Actions 4-9: switches
         
+        # Force Switch: ignore moves, ensure illegal moves don't crash the env
+        if battle.force_switch:
+            if action >= 4:
+                switch_idx = action - 4
+                if switch_idx < len(battle.available_switches):
+                    return self.player.create_order(battle.available_switches[switch_idx])
+            
+            # Fallback for forced switch: pick first available switch if agent tried to move
+            if battle.available_switches:
+                return self.player.create_order(battle.available_switches[0])
+            else:
+                return self.player.choose_random_move(battle)
+
+        # 2. NORMAL MOVE/SWITCH LOGIC
         if action < 4 and action < len(battle.available_moves):
             return self.player.create_order(battle.available_moves[action])
         
@@ -294,11 +366,11 @@ class PokemonShowdownEnv(gym.Env):
             if switch_idx < len(battle.available_switches):
                 return self.player.create_order(battle.available_switches[switch_idx])
         
-        # Fallback to random valid move
+        # Fallback to random if something goes wrong
         return self.player.choose_random_move(battle)
 
     # --------------------------------------------------
-    # BATTLE STATUS HELPERS
+    # STATE HELPERS
     # --------------------------------------------------
     def _get_team_hp(self, battle, my_team=True):
         if battle is None:
@@ -313,10 +385,28 @@ class PokemonShowdownEnv(gym.Env):
                 total += 1.0
         return total
 
-    # --------------------------------------------------
-    # REWARD
-    # --------------------------------------------------
-    def _compute_reward(self):
+    def _count_hazards(self, battle, my_side=True):
+        """Count hazards on the specified side."""
+        side = battle.side_conditions if my_side else battle.opponent_side_conditions
+        count = 0
+        if "stealthrock" in side: count += 1
+        if "stickyweb" in side: count += 1
+        if "spikes" in side: count += side["spikes"]
+        if "toxicspikes" in side: count += side["toxicspikes"]
+        return count
+
+    def _sum_boosts(self, battle, my_side=True):
+        """Sum positive boosts for active pokemon."""
+        mon = battle.active_pokemon if my_side else battle.opponent_active_pokemon
+        if mon is None:
+            return 0
+        total = 0
+        for stat, val in mon.boosts.items():
+            if val > 0:
+                total += val
+        return total
+
+    def _compute_reward(self, is_switch_action):
         battle = self._current_battle
 
         if battle is None:
@@ -325,29 +415,70 @@ class PokemonShowdownEnv(gym.Env):
         if battle.finished:
             return self._compute_final_reward()
 
+        # -- Calculate State Differences --
         my_hp = self._get_team_hp(battle, my_team=True)
         opp_hp = self._get_team_hp(battle, my_team=False)
+        opp_hazards = self._count_hazards(battle, my_side=False)
+        my_boosts = self._sum_boosts(battle, my_side=True)
 
         if self._prev_my_hp is None:
             self._prev_my_hp = my_hp
             self._prev_opp_hp = opp_hp
+            self._prev_opp_hazards = opp_hazards
+            self._prev_my_boosts = my_boosts
             return 0.0, False
 
-        prev_my = float(self._prev_my_hp) if self._prev_my_hp is not None else 0.0
-        prev_opp = float(self._prev_opp_hp) if self._prev_opp_hp is not None else 0.0
+        # Delta calculations
+        prev_my = float(self._prev_my_hp) if self._prev_my_hp is not None else 6.0
+        prev_opp = float(self._prev_opp_hp) if self._prev_opp_hp is not None else 6.0
 
         damage_to_opp = prev_opp - opp_hp
         damage_taken = prev_my - my_hp
+        
+        hazards_set = max(0, opp_hazards - self._prev_opp_hazards)
+        boosts_gained = max(0, my_boosts - self._prev_my_boosts)
 
+        # Update tracking
         self._prev_my_hp = my_hp
         self._prev_opp_hp = opp_hp
+        self._prev_opp_hazards = opp_hazards
+        self._prev_my_boosts = my_boosts
 
-        my_faints = sum(1 for mon in battle.team.values() if mon.fainted)
-        opp_faints = sum(1 for mon in battle.opponent_team.values() if mon.fainted)
+        # Balance weights
+        REWARD_DAMAGE = 1.0     
+        REWARD_HAZARD = 0.1     
+        REWARD_BOOST = 0.05     
+        REWARD_KO = 0.5         
+        PENALTY_KO = -0.5       
+        PENALTY_STALL = -0.005  
+        PENALTY_SWITCH = -0.08  
 
-        reward = damage_to_opp - damage_taken + 0.5 * (opp_faints - my_faints)
-        reward -= 0.02
-        reward *= 1.2
+        # Refined Faint Tracking
+        if not hasattr(self, '_prev_my_faints'): self._prev_my_faints = 0
+        if not hasattr(self, '_prev_opp_faints'): self._prev_opp_faints = 0
+        
+        new_my_faints = sum(1 for mon in battle.team.values() if mon.fainted)
+        new_opp_faints = sum(1 for mon in battle.opponent_team.values() if mon.fainted)
+        
+        ko_bonus = max(0, new_opp_faints - self._prev_opp_faints) * REWARD_KO
+        ko_penalty = max(0, new_my_faints - self._prev_my_faints) * PENALTY_KO
+        
+        self._prev_my_faints = new_my_faints
+        self._prev_opp_faints = new_opp_faints
+
+        reward = 0.0
+        reward += (damage_to_opp * REWARD_DAMAGE)
+        reward -= (damage_taken * REWARD_DAMAGE)
+        reward += (hazards_set * REWARD_HAZARD)
+        reward += (boosts_gained * REWARD_BOOST)
+        reward += ko_bonus
+        reward += ko_penalty
+        reward += PENALTY_STALL
+        
+        if is_switch_action:
+            reward += PENALTY_SWITCH
+
+        # Clip per-step reward (except terminal)
         reward = float(np.clip(reward, -1.0, 1.0))
 
         return reward, False
@@ -357,103 +488,23 @@ class PokemonShowdownEnv(gym.Env):
 
         if battle is None:
             return 0.0, True
+        
+        # Clear state trackers
+        self._prev_my_hp = None
+        self._prev_my_faints = 0
+        self._prev_opp_faints = 0
 
         if battle.won:
             print(f"[Episode {self._episode_count}] WON!")
-            return 2.0, True
+            return 3.0, True
         elif battle.lost:
             print(f"[Episode {self._episode_count}] LOST")
-            return -2.0, True
+            return -3.0, True
         else:
             return 0.0, True
 
-    # --------------------------------------------------
-    # OBSERVATION
-    # --------------------------------------------------
-    def _build_obs(self, battle):
-        if battle is None:
-            return
+        self._obs = build_obs(battle)
 
-        type_adv = 0.0
-
-        if battle.active_pokemon and battle.opponent_active_pokemon:
-            for move in battle.available_moves:
-                try:
-                    eff = battle.opponent_active_pokemon.damage_multiplier(move.type)
-                    type_adv = max(type_adv, eff / 4.0)
-                except:
-                    pass
-
-        my_hp = []
-        for mon in battle.team.values():
-            hp_frac = mon.current_hp_fraction
-            if hp_frac is not None:
-                my_hp.append(float(hp_frac))
-            elif mon.fainted:
-                my_hp.append(0.0)
-            else:
-                my_hp.append(1.0)
-
-        opp_hp = []
-        for mon in battle.opponent_team.values():
-            hp_frac = mon.current_hp_fraction
-            if hp_frac is not None:
-                opp_hp.append(float(hp_frac))
-            elif mon.fainted:
-                opp_hp.append(0.0)
-            else:
-                opp_hp.append(1.0)
-
-        my_hp = (my_hp + [0.0] * 6)[:6]
-        opp_hp = (opp_hp + [0.0] * 6)[:6]
-
-        my_faints = sum(1 for mon in battle.team.values() if mon.fainted) / 6.0
-        opp_faints = sum(1 for mon in battle.opponent_team.values() if mon.fainted) / 6.0
-
-        my_status = 0.0
-        if battle.active_pokemon is not None:
-            my_status = float(battle.active_pokemon.status is not None)
-
-        opp_status = 0.0
-        if battle.opponent_active_pokemon is not None:
-            opp_status = float(battle.opponent_active_pokemon.status is not None)
-
-        weather_flag = float(battle.weather is not None and len(battle.weather) > 0)
-        terrain_flag = float(battle.fields is not None and len(battle.fields) > 0)
-
-        turn_norm = min(battle.turn / 100.0, 1.0)
-        moves_norm = len(battle.available_moves) / 4.0
-        switches_norm = len(battle.available_switches) / 5.0
-
-        obs = [
-            turn_norm,
-            *my_hp,
-            *opp_hp,
-            type_adv,
-            moves_norm,
-            switches_norm,
-            my_faints,
-            opp_faints,
-            my_status,
-            opp_status,
-            weather_flag,
-            terrain_flag,
-        ]
-
-        arr = np.array(obs, dtype=np.float32)
-
-        if arr.shape[0] < 23:
-            arr = np.pad(arr, (0, 23 - arr.shape[0]))
-        elif arr.shape[0] > 23:
-            arr = arr[:23]
-
-        arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
-
-        self._obs = arr
-
-    # --------------------------------------------------
-    # ACTION MASK
-    # --------------------------------------------------
     def _build_action_mask(self, battle):
         if battle is None:
             self.action_mask = np.ones(10, dtype=np.int8)
@@ -461,50 +512,21 @@ class PokemonShowdownEnv(gym.Env):
 
         mask = np.zeros(10, dtype=np.int8)
 
-        for i in range(min(len(battle.available_moves), 4)):
-            mask[i] = 1
+        # Mask moves during forced switches
+        if not battle.force_switch:
+            for i in range(min(len(battle.available_moves), 4)):
+                mask[i] = 1
 
         for i in range(min(len(battle.available_switches), 6)):
             mask[4 + i] = 1
 
         if mask.sum() == 0:
+            # Emergency fallback: if everything is masked, allow everything (poke-env will handle legality)
             mask = np.ones(10, dtype=np.int8)
 
         self.action_mask = mask
 
-    # --------------------------------------------------
-    # DEBUG PRINT
-    # --------------------------------------------------
-    def _print_turn_info(self, action, reward):
-        battle = self._current_battle
-
-        if battle is None:
-            return
-        if battle.active_pokemon is None:
-            return
-        if battle.opponent_active_pokemon is None:
-            return
-
-        active = battle.active_pokemon.species
-        opp = battle.opponent_active_pokemon.species
-
-        move_names = [m.id for m in battle.available_moves]
-        switch_names = [p.species for p in battle.available_switches]
-
-        action_str = "AUTO"
-
-        if isinstance(action, (int, np.integer)):
-            if 0 <= action < len(move_names):
-                action_str = move_names[action]
-            elif action >= 4 and (action - 4) < len(switch_names):
-                action_str = f"SWITCH->{switch_names[action - 4]}"
-
-        print(
-            f"Turn {battle.turn:>2} | "
-            f"{active} vs {opp} | "
-            f"Action: {action_str:<15} | "
-            f"Reward: {reward:+.3f}"
-        )
+    # Pass
 
     # --------------------------------------------------
     # CLEANUP

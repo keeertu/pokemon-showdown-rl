@@ -1,48 +1,36 @@
-# Python
-venv/
-.venv/
-env/
+# Python Caches
 __pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache/
-.coverage
-htmlcov/
-.mypy_cache/
 
-# RL / ML Artifacts
-models/
-checkpoints/
-runs/
-logs/
-*.pt
-*.pth
-*.onnx
-*.ckpt
-runs/
-replays/
-videos/
+# Environments
+venv/
+env/
+.python_env/
+.venv/
+Include/
+Lib/
+Scripts/
+pyvenv.cfg
 
+# Logs
+ppo_logs/
+dqn_logs/
+*.log
 
-# Pokémon Showdown / Node.js
-showdown/pokemon-showdown/node_modules/
-showdown/pokemon-showdown/dist/
-showdown/pokemon-showdown/logs/
-showdown/pokemon-showdown/databases/*.db
-showdown/pokemon-showdown/config/*.js
-!showdown/pokemon-showdown/config/config-example.js
+# Models (Keep the folder, but maybe ignore specific temp files if any)
+# models/*/ # Uncomment if you want to ignore all models
+!models/ppo/ppo_leon_v1.zip
+!models/dqn/dqn_leon_v1.zip
 
-# Environment & Secrets
-.env
-.env.*
-*.secret
-
-# OS / Editor Noise
-.DS_Store
-Thumbs.db
+# OS/Editor
 .vscode/
 .idea/
-*.swp
-*.swo
+.DS_Store
+Thumbs.db
 
-*.zip
+# Project Specific
+showdown/pokemon-showdown/logs/
+showdown/pokemon-showdown/config/config.js.bak
+node_modules/
+.env

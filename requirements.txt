@@ -1,0 +1,9 @@
+# Core RL and environment dependencies
+stable_baselines3==2.7.1
+gymnasium==1.2.3
+poke_env==0.11.0
+numpy>=2.0.0
+torch>=2.0.0
+tensorboard>=2.10.0
+websockets>=10.0
+requests>=2.25.0

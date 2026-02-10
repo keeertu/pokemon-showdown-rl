@@ -1,11 +1,11 @@
 import os
-from stable_baselines3 import PPO
+from stable_baselines3 import DQN
 from pokemon_env import PokemonShowdownEnv
 from model_utils import get_latest_model
 
 def main():
-    model_dir = "models/ppo"
-    model_prefix = "ppo_leon"
+    model_dir = "models/dqn"
+    model_prefix = "dqn_leon"
     os.makedirs(model_dir, exist_ok=True)
 
     print("Creating environment...")
@@ -15,27 +15,28 @@ def main():
     
     if latest_model_path:
         print(f"Loading latest model: {latest_model_path} (Version {latest_v})")
-        model = PPO.load(latest_model_path, env=env)
+        model = DQN.load(latest_model_path, env=env)
     else:
-        print("No existing model found. Creating new PPO model...")
-        model = PPO(
+        print("No existing model found. Creating new DQN model...")
+        model = DQN(
             "MlpPolicy",
             env,
             verbose=1,
-            tensorboard_log="./ppo_logs/",
-            n_steps=512,
-            batch_size=64,
-            n_epochs=10,
-            learning_rate=3e-4,
+            tensorboard_log="./dqn_logs/",
+            learning_rate=1e-4,
+            buffer_size=100000,
+            learning_starts=1000,
+            batch_size=32,
+            tau=1.0,
             gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            ent_coef=0.01,
-            vf_coef=0.5,
-            max_grad_norm=0.5,
+            train_freq=4,
+            gradient_steps=1,
+            target_update_interval=1000,
+            exploration_fraction=0.1,
+            exploration_final_eps=0.02,
         )
 
-    print(f"Starting PPO training (Timesteps: 20,000)...")
+    print(f"Starting DQN training (Timesteps: 20,000)...")
     model.learn(total_timesteps=20_000)
 
     new_v = latest_v + 1
