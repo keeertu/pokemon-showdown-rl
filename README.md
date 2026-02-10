@@ -134,6 +134,3 @@ Training is standardized and iterative. To start a training run (20,000 steps pe
 
 ## 📜 License
 Available under the **MIT License**. See `LICENSE` for details.
-
----
-*Created by k33r47 - 2026*
