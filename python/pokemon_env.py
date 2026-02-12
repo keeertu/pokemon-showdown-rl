@@ -9,6 +9,7 @@ from gymnasium import spaces
 
 from poke_env.player.player import Player
 from poke_env.player import RandomPlayer
+from poke_env.player.battle_order import DefaultBattleOrder, BattleOrder
 from poke_env.concurrency import POKE_LOOP, create_in_poke_loop
 from poke_env.ps_client import AccountConfiguration
 from model_utils import build_obs
@@ -46,19 +47,27 @@ class RLPlayer(Player):
         self._current_battle = battle
         self._battle_finished = battle.finished
         
+
         if battle.finished:
-            return self.choose_random_move(battle)
+            return self.choose_random_move(battle) or self.choose_default_move()
         
         # Pass battle state to the environment step()
         await self._battle_queue.put(battle)
 
         # Wait for the next order (step() takes action)
         try:
-            order = await asyncio.wait_for(self._order_queue.get(), timeout=30.0)
+            # 65s timeout allows step() retry loop (60s) to control pacing
+            order = await asyncio.wait_for(self._order_queue.get(), timeout=65.0)
+            
+            # Guard: ensure we never return None
+            if order is None:
+                print(f"[WARN] choose_move received None order (Turn {battle.turn}). Fallback to random.")
+                return self.choose_random_move(battle) or self.choose_default_move()
+                
             return order
         except asyncio.TimeoutError:
-            print(f"[WARN] choose_move timeout (Turn {battle.turn}), using random move")
-            return self.choose_random_move(battle)
+            print(f"[WARN] choose_move timeout (Turn {battle.turn}). Fallback to random.")
+            return self.choose_random_move(battle) or self.choose_default_move()
 
     def _battle_finished_callback(self, battle):
         self._battle_finished = True
@@ -89,6 +98,12 @@ class RLPlayer(Player):
             self._order_queue.put(order), POKE_LOOP
         )
 
+    def clear_order_queue(self):
+        """Clear the order queue to prevent deadlocks (called from main thread)."""
+        asyncio.run_coroutine_threadsafe(
+            self._drain_queue(self._order_queue), POKE_LOOP
+        ).result(timeout=1.0)
+
     def reset_for_new_battle(self):
         self._current_battle = None
         self._battle_finished = False
@@ -99,7 +114,7 @@ class RLPlayer(Player):
                     self._drain_queue(self._battle_queue), POKE_LOOP
                 ).result(timeout=1.0)
                 break
-        except:
+        except Exception:
             pass
         try:
             while not self._order_queue.empty():
@@ -107,7 +122,7 @@ class RLPlayer(Player):
                     self._drain_queue(self._order_queue), POKE_LOOP
                 ).result(timeout=1.0)
                 break
-        except:
+        except Exception:
             pass
         # Remove only finished battles to release memory safely
         finished_tags = [tag for tag, b in self.battles.items() if b.finished]
@@ -118,7 +133,7 @@ class RLPlayer(Player):
         while not q.empty():
             try:
                 q.get_nowait()
-            except:
+            except Exception:
                 break
 
 
@@ -190,11 +205,11 @@ class PokemonShowdownEnv(gym.Env):
         # Stabilization delay
         time.sleep(0.1)
         
-        # Period GC to keep memory low
-        if self._episode_count % 1 == 0:
+        # Periodic GC to keep memory low
+        if self._episode_count % 20 == 0:
             gc.collect()
 
-        # 3. Resource Tracking every 50 episodes
+        # Resource tracking every 50 episodes
         if self._episode_count % 50 == 0:
             active_battles = len(self.player.battles)
             print(f"[STATS] Episode {self._episode_count} | Active Battles: {active_battles}")
@@ -265,7 +280,7 @@ class PokemonShowdownEnv(gym.Env):
         if self.enable_logging:
             print(f"[Episode {self._episode_count}] Battle started! ID: {battle.battle_tag}")
         self._current_battle = battle
-        self._build_obs(battle)
+        self._obs = build_obs(battle)
         self._build_action_mask(battle)
         # Initialize reward trackers from current state
         self._prev_my_hp = self._get_team_hp(battle, my_team=True)
@@ -287,21 +302,36 @@ class PokemonShowdownEnv(gym.Env):
             reward, terminated = self._compute_final_reward()
             return self._obs.copy(), reward, terminated, False, {"action_mask": self.action_mask.copy()}
 
+        # Deadlock prevention: clear stale orders before dispatching new one
+        self.player.clear_order_queue()
+
         # Dispatch order
         order = self._action_to_order(int(action), self._current_battle)
+        if order is None:
+             # Make sure we send *something* to keep the loop alive, even if it's default
+             order = self.player.choose_default_move()
         self.player.put_order_sync(order)
 
-        # Wait for turn resolution
-        battle = self.player.get_battle_sync(timeout=30.0)
-
+        # Wait for turn resolution with Retry Loop
+        battle = None
+        # Retry for ~60 seconds (12 * 5s) to handle human thinking time or server lag
+        MAX_RETRIES = 12
+        for attempt in range(MAX_RETRIES):
+            battle = self.player.get_battle_sync(timeout=5.0)
+            if battle is not None:
+                break
+            
+        
         if battle is None:
             # Timeout - check if battle finished
             if self._current_battle and self._current_battle.finished:
                 reward, terminated = self._compute_final_reward()
                 return self._obs.copy(), reward, terminated, False, {"action_mask": self.action_mask.copy()}
-            # Return current state with small penalty
-            print(f"[WARN] Step timeout at turn {self._current_battle.turn}")
-            return self._obs.copy(), -0.05, False, False, {"action_mask": self.action_mask.copy()}
+            
+            # Real Timeout / Server Unresponsive -> Abort Episode Safely
+            print(f"[WARN] Step timeout (Turn {self._current_battle.turn}) - Aborting Episode")
+            # Return DONE=True to reset environment
+            return self._obs.copy(), 0.0, True, False, {"action_mask": self.action_mask.copy()}
 
         self._current_battle = battle
         self._obs = build_obs(battle)
@@ -355,9 +385,10 @@ class PokemonShowdownEnv(gym.Env):
             if battle.available_switches:
                 return self.player.create_order(battle.available_switches[0])
             else:
-                return self.player.choose_random_move(battle)
+                # Force switch with no switches — should not happen if masked correctly
+                return self.player.choose_random_move(battle) or self.player.choose_default_move()
 
-        # 2. NORMAL MOVE/SWITCH LOGIC
+        # Normal move/switch logic
         if action < 4 and action < len(battle.available_moves):
             return self.player.create_order(battle.available_moves[action])
         
@@ -367,7 +398,7 @@ class PokemonShowdownEnv(gym.Env):
                 return self.player.create_order(battle.available_switches[switch_idx])
         
         # Fallback to random if something goes wrong
-        return self.player.choose_random_move(battle)
+        return self.player.choose_random_move(battle) or self.player.choose_default_move()
 
     # --------------------------------------------------
     # STATE HELPERS
@@ -503,8 +534,6 @@ class PokemonShowdownEnv(gym.Env):
         else:
             return 0.0, True
 
-        self._obs = build_obs(battle)
-
     def _build_action_mask(self, battle):
         if battle is None:
             self.action_mask = np.ones(10, dtype=np.int8)
@@ -526,7 +555,6 @@ class PokemonShowdownEnv(gym.Env):
 
         self.action_mask = mask
 
-    # Pass
 
     # --------------------------------------------------
     # CLEANUP

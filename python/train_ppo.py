@@ -9,7 +9,10 @@ def main():
     os.makedirs(model_dir, exist_ok=True)
 
     print("Creating environment...")
-    env = PokemonShowdownEnv()
+    env = PokemonShowdownEnv(
+        player_team_file="leon_team.txt",
+        opponent_team_file="leon_team.txt",
+    )
 
     latest_model_path, latest_v = get_latest_model(model_dir, model_prefix)
     

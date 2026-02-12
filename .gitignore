@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 # Environments
+python/venv/
 venv/
 env/
 .python_env/
@@ -18,10 +19,12 @@ ppo_logs/
 dqn_logs/
 *.log
 
-# Models (Keep the folder, but maybe ignore specific temp files if any)
-# models/*/ # Uncomment if you want to ignore all models
-!models/ppo/ppo_leon_v1.zip
-!models/dqn/dqn_leon_v1.zip
+# Models (Ignore all local training artifacts)
+models/ppo/*.zip
+models/dqn/*.zip
+# Keep the directory structure
+!models/ppo/.gitkeep
+!models/dqn/.gitkeep
 
 # OS/Editor
 .vscode/

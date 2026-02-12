@@ -39,7 +39,10 @@ def main():
         return
 
     print(f"Initializing listener...")
-    env = PokemonShowdownEnv(human_opponent=True)
+    env = PokemonShowdownEnv(
+        player_team_file="leon_team.txt",
+        human_opponent=True,
+    )
 
     print(f"Agent ({mode_name}) is active. Challenge it on your local Showdown server.")
     print(f"Username: {env.player.username}")
